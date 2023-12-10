@@ -1,40 +1,76 @@
-"""The Kostal piko integration."""
-
-
+"""Support for Kostal Piko inverters."""
+from datetime import timedelta
 import logging
 
 from kostalpyko.kostalpyko import Piko
 
+import voluptuous as vol
 
+from homeassistant.components.sensor import PLATFORM_SCHEMA
 from homeassistant.const import (
     CONF_USERNAME,
     CONF_PASSWORD,
     CONF_HOST,
     CONF_MONITORED_CONDITIONS,
+    CONF_NAME,
 )
-
 from homeassistant.helpers.entity import Entity
 from homeassistant.util import Throttle
+import homeassistant.helpers.config_validation as cv
 
-
-from .const import SENSOR_TYPES, MIN_TIME_BETWEEN_UPDATES, DOMAIN
+MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=30)
 
 _LOGGER = logging.getLogger(__name__)
 
+DEFAULT_NAME = "kostal_piko"
 
-async def async_setup_entry(hass, entry, async_add_entities):
-    """Add an Kostal piko entry."""
-    # Add the needed sensors to hass
-    piko = Piko(
-        entry.data[CONF_HOST], entry.data[CONF_USERNAME], entry.data[CONF_PASSWORD]
-    )
-    data = PikoData(piko, hass)
+SENSOR_TYPES = {
+    "solar_generator_power": ["Solar Generator Leistung", "W", "mdi:solar-power"],
+    "consumption_phase_1": ["Verbrauch Phase 1", "W", "mdi:power-socket-eu"],
+    "consumption_phase_2": ["Verbrauch Phase 2", "W", "mdi:power-socket-eu"],
+    "consumption_phase_3": ["Verbrauch Phase 3", "W", "mdi:power-socket-eu"],
+    "current_power": ["Aktuelle Leistung", "W", "mdi:solar-power"],
+    "total_energy": ["Gesamte Leistung", "kWh", "mdi:solar-power", "energy", "total"],
+    "daily_energy": ["Taegliche Leistung", "kWh", "mdi:solar-power", "energy", "total_increasing"],
+    "string1_voltage": ["String 1 Spannung", "V", "mdi:current-ac"],
+    "string1_current": ["String 1 Strom", "A", "mdi:flash"],
+    "string2_voltage": ["String 2 Spannung", "V", "mdi:current-ac"],
+    "string2_current": ["String 2 Strom", "A", "mdi:flash"],
+    "string3_voltage": ["String 3 Spannung", "V", "mdi:current-ac"],
+    "string3_current": ["String 3 Strom", "A", "mdi:flash"],
+    "l1_voltage": ["L1 Spannung", "V", "mdi:current-ac"],
+    "l1_power": ["L1 Leistung", "W", "mdi:power-plug"],
+    "l2_voltage": ["L2 Spannung", "V", "mdi:current-ac"],
+    "l2_power": ["L2 Leistung", "W", "mdi:power-plug"],
+    "l3_voltage": ["L3 Spannung", "V", "mdi:current-ac"],
+    "l3_power": ["L3 Leistung", "W", "mdi:power-plug"],
+    "status": ["Status", None, "mdi:solar-power"],
+}
 
-    entities = []
 
-    for sensor in entry.data[CONF_MONITORED_CONDITIONS]:
-        entities.append(PikoInverter(data, sensor, entry.title))
-    async_add_entities(entities)
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+    {
+        vol.Required(CONF_USERNAME): cv.string,
+        vol.Required(CONF_PASSWORD): cv.string,
+        vol.Required(CONF_HOST): cv.string,
+        vol.Required(CONF_MONITORED_CONDITIONS): vol.All(
+            cv.ensure_list, [vol.In(list(SENSOR_TYPES))]
+        ),
+        vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+    }
+)
+
+
+def setup_platform(hass, config, add_entities, discovery_info=None):
+    """Set up Piko inverter."""
+    piko = Piko(config[CONF_HOST], config[CONF_USERNAME], config[CONF_PASSWORD])
+
+    dev = []
+    data = PikoData(piko)
+    for sensor in config[CONF_MONITORED_CONDITIONS]:
+        dev.append(PikoInverter(data, sensor, config[CONF_NAME]))
+
+    add_entities(dev)
 
 
 class PikoInverter(Entity):
@@ -49,8 +85,10 @@ class PikoInverter(Entity):
         self._state = None
         self._unit_of_measurement = SENSOR_TYPES[self.type][1]
         self._icon = SENSOR_TYPES[self.type][2]
-        self.serial_number = None
-        self.model = None
+        if len(SENSOR_TYPES[self.type]) > 3:
+            self._device_class = SENSOR_TYPES[self.type][3]
+        if len(SENSOR_TYPES[self.type]) > 4:
+            self._state_class = SENSOR_TYPES[self.type][4]
         self.update()
 
     @property
@@ -69,32 +107,31 @@ class PikoInverter(Entity):
         return self._unit_of_measurement
 
     @property
+    def device_class(self):
+        if hasattr(self, "_device_class"):
+            return self._device_class
+
+    @property
+    def state_class(self):
+        if hasattr(self, "_state_class"):
+            return self._state_class
+
+    @property
+    def capability_attributes(self):
+        if hasattr(self, "_state_class"):
+            return {"state_class": self._state_class}
+        return None
+
+    @property
     def icon(self):
         """Return icon."""
         return self._icon
-
-    @property
-    def unique_id(self):
-        """Return unique id based on device serial and variable."""
-        return "{} {}".format(self.serial_number, self._sensor)
-
-    @property
-    def device_info(self):
-        """Return information about the device."""
-        return {
-            "identifiers": {(DOMAIN, self.serial_number)},
-            "name": self._name,
-            "manufacturer": "Kostal",
-            "model": self.model,
-        }
 
     def update(self):
         """Update data."""
         self.piko.update()
         data = self.piko.data
         ba_data = self.piko.ba_data
-        self.serial_number = self.piko.info[0]
-        self.model = self.piko.info[1]
         if ba_data is not None:
             if self.type == "solar_generator_power":
                 if len(ba_data) > 1:
@@ -218,7 +255,6 @@ class PikoInverter(Entity):
                     else:
                         # 3 Strings
                         self._state = data[15]
-
                 else:
                     return None
 
@@ -226,26 +262,16 @@ class PikoInverter(Entity):
 class PikoData(Entity):
     """Representation of a Piko inverter."""
 
-    def __init__(self, piko, hass):
+    def __init__(self, piko):
         """Initialize the data object."""
-        self.piko = piko
-        self.hass = hass
         self.data = []
         self.ba_data = []
-        self.info = None
-        self.info_update()
+        self.piko = piko
 
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     def update(self):
         """Update inverter data."""
-        # pylint: disable=protected-access
         self.data = self.piko._get_raw_content()
         self.ba_data = self.piko._get_content_of_own_consumption()
         _LOGGER.debug(self.data)
         _LOGGER.debug(self.ba_data)
-
-    def info_update(self):
-        """Update inverter info."""
-        # pylint: disable=protected-access
-        self.info = self.piko._get_info()
-        _LOGGER.debug(self.info)
